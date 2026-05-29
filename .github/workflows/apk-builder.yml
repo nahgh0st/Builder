@@ -1,0 +1,126 @@
+name: Build APK from Web Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_path:
+        description: 'Path to the uploaded ZIP file'
+        required: true
+      build_type:
+        description: 'Build type (debug or release)'
+        required: true
+        default: 'debug'
+      email:
+        description: 'Email for notifications'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Download Uploaded ZIP
+      run: |
+        echo "Downloading ZIP from: ${{ github.server_url }}/${{ github.repository }}/raw/main/${{ github.event.inputs.upload_path }}"
+        wget -O project.zip "${{ github.server_url }}/${{ github.repository }}/raw/main/${{ github.event.inputs.upload_path }}"
+        ls -lh project.zip
+
+    - name: Extract Project Files
+      run: |
+        mkdir -p extracted
+        unzip -q project.zip -d extracted/
+        ls -la extracted/
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+
+    - name: Prepare Build Files
+      run: |
+        cd extracted
+        if [ -d "app" ]; then
+          echo "Found app directory"
+        else
+          echo "Restructuring project..."
+          find . -maxdepth 2 -type d -name 'app' | while read appdir; do
+            dir=$(dirname "$appdir")
+            cp -r "$dir"/* . 2>/dev/null || true
+            break
+          done
+        fi
+        if [ -f "gradlew" ]; then
+          chmod +x gradlew
+        fi
+        ls -la
+
+    - name: Build Debug APK
+      if: github.event.inputs.build_type == 'debug'
+      run: |
+        cd extracted
+        if [ -f "gradlew" ]; then
+          ./gradlew assembleDebug
+        else
+          gradle assembleDebug
+        fi
+
+    - name: Build Release APK
+      if: github.event.inputs.build_type == 'release'
+      run: |
+        cd extracted
+        if [ -f "gradlew" ]; then
+          ./gradlew assembleRelease
+        else
+          gradle assembleRelease
+        fi
+
+    - name: Find and Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-${{ github.event.inputs.build_type }}-apk
+        path: extracted/app/build/outputs/apk/${{ github.event.inputs.build_type }}/
+        retention-days: 30
+
+    - name: Send Email Notification
+      if: always() && env.EMAIL_USER != ''
+      uses: davisb10/action-send-email@main
+      with:
+        server_address: smtp.gmail.com
+        server_port: 465
+        username: ${{ secrets.EMAIL_USER }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "✅ APK Build Complete - ${{ github.event.inputs.build_type }}"
+        to: ${{ github.event.inputs.email }}
+        from: ${{ secrets.EMAIL_USER }}
+        body: |
+          Your APK build has completed successfully!
+          
+          Build Type: ${{ github.event.inputs.build_type }}
+          Build Status: ${{ job.status }}
+          Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          Download your APK from the artifacts section in the GitHub Actions workflow.
+          
+          Thank you for using APK Builder!
+
+    - name: Cleanup Uploaded File
+      if: always()
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git pull origin main || true
+        if [ -f "${{ github.event.inputs.upload_path }}" ]; then
+          rm "${{ github.event.inputs.upload_path }}"
+          git add "${{ github.event.inputs.upload_path }}"
+          git commit -m "Cleanup: Remove uploaded file after build" || true
+          git push origin main || true
+        fi
